@@ -1,0 +1,134 @@
+---
+title: "EDS 223: Week 9 Lab"
+author: "Tom Gibbens-Matsuyama"
+format: html
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+library(sf)
+library(terra)
+library(tidyverse)
+library(here)
+library(rpart)
+library(rpart.plot)
+library(tmap)
+```
+
+```{r}
+filelist <- list.files(here::here("data", "week9", "landsat-data"), full.names = TRUE)
+
+landsat <- rast(filelist)
+
+# Change band names to correct names
+names(landsat) <- c("blue", "green", "red", "NIR", "SWIR1", "SWIR2")
+
+# Let's plot 
+plotRGB(landsat, r = 3, g = 2, b = 1, stretch = "lin")
+```
+
+## Load study area
+```{r}
+# Read in shapefile for portion of SB county
+sb_county_south <- st_read(here("data", "week9", "SB_county_south.shp")) %>% 
+  st_transform(., crs = crs(landsat))
+
+tm_shape(sb_county_south) +
+  tm_borders()
+```
+
+```{r}
+# Crop the landsat scene to extent of the study area
+landsat_cropped <- terra::crop(landsat, sb_county_south)
+
+# Mask the raster to the study area
+landsat_masked <- terra::mask(landsat_cropped, sb_county_south)
+
+# Remove variables we won't use anymore for computational power
+rm(landsat, sb_county_south, landsat_cropped)
+
+plotRGB(landsat_masked, r = 3, g = 2, b = 1, stretch = "lin")
+```
+
+### We need to get rid of erroneous numbers and scale our factors
+
+## Converting landsat values into reflectance
+
+```{r}
+# Reclassify erroneous values as NA
+rcl <- matrix(c(-Inf, 7273, NA,
+                43636, Inf, NA), ncol = 3, byrow = TRUE)
+
+# Got rid of landsat variable earlier, so we can recall it as something else
+landsat <- terra::classify(landsat_masked, rcl = rcl)
+
+# Adjust values based on scaling and additive factor
+# Formula from website: ##### i.e. Digital Number (DN) * scale_factor + offset #####
+landsat <- (landsat * 	0.0000275 - 0.2) * 100
+summary(landsat)
+```
+
+## Training classifier
+
+```{r}
+# Read in training data
+training_data <- st_read(here("data", "week9", "trainingdata.shp")) %>% 
+  st_transform(., crs = crs(landsat))
+```
+
+```{r}
+# Extract reflectance values at training sites
+training_data_values <- terra::extract(landsat, training_data, df = TRUE)
+
+# Convert training data into data frame
+training_data_attributes <- training_data %>% 
+  st_drop_geometry
+
+sb_training_data <- left_join(training_data_values, training_data_attributes,
+          by = c("ID" = "id")) %>% 
+  mutate(type = as.factor(type))
+```
+
+
+```{r}
+# Establish model formula
+##### We can predict land cover "type" based off of these six bands
+sb_formula <- type ~ red + green + blue + NIR + SWIR1 + SWIR2
+
+# Train decision tree
+sb_decision_tree <- rpart(formula = sb_formula,
+                          data = sb_training_data,
+                          method = "class",          #### Performing a classifcation
+                          na.action = na.omit)   
+
+# Plot a decision tree
+prp(sb_decision_tree)
+```
+
+## Classify image
+
+```{r}
+# Classify our image based on decision tree 
+sb_classification <- terra::predict(landsat, sb_decision_tree,
+                                    type = "class",
+                                    na.rm = TRUE)
+
+levels(sb_training_data$type)
+levels(sb_classification)
+```
+
+```{r}
+tm_shape(sb_classification) +
+  tm_raster(palette = c("#8DB580", "#F2DDA4", "#7E8987", "#6A8EAE"),
+            labels = c("green vegetation",
+                       "soil/dead greass",
+                       "urban",
+                       "water"),
+            title = "Land cover type") +
+  tm_layout(legend.position = c("left", "bottom"),
+            main.title = "Santa Barbara Landcover")
+  
+```
+
